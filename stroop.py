@@ -3,8 +3,8 @@ import random
 import time
 import math
 import csv
+from scipy.stats import ttest_ind
 
-from pygame.examples.eventlist import showtext
 
 # Initialize pygame
 pygame.init()
@@ -34,7 +34,14 @@ COLORS = {
 WORD_LIST = list(COLORS.keys())
 
 # Log file for results
-LOG_FILE = 'stroop_test_results.csv'
+from pathlib import Path
+
+# Determine the directory where the script (stroop.py) is located
+script_dir = Path(__file__).parent
+
+# Define paths for the log file and result figure
+LOG_FILE = script_dir / 'stroop_test_results.csv'
+RESULT_FIGURE = script_dir / 'result.pdf'
 
 # Constants
 BUTTON_WIDTH = 150
@@ -51,10 +58,16 @@ def show_instructions(text, font, color, position, line_spacing=LINE_SPACING):
         screen.blit(text_obj, text_rect)
         y += text_rect.height + line_spacing
 
-def draw_text(text, font, color, position):
+def draw_text(text, font, color, position, incongruent=False):
+    if incongruent:
+        color = incongruent_color(color)
+        color_name = [preset_name for preset_name, preset_color in COLORS.items() if preset_color == color][0]
+    else:
+        color_name = text
     text_obj = font.render(text, True, color)
     text_rect = text_obj.get_rect(center=position)
     screen.blit(text_obj, text_rect)
+    return color_name
 
 def draw_button(text, position, width, height, color, text_color, show_text=True):
     button_rect = pygame.Rect(position[0] - width // 2, position[1] - height // 2, width, height)
@@ -85,15 +98,33 @@ def draw_buttons_around_center(options, radius=RADIUS, use_color=True, use_text=
         y = CENTER_POSITION[1] + int(radius * math.sin(angle))
         color = COLORS[option] if use_color else (200, 200, 200)
         text_color = (255, 255, 255) if use_color else (0, 0, 0)
-        button_rect = draw_button(option, (x, y), BUTTON_WIDTH, BUTTON_HEIGHT, color, text_color, show_text = use_text)
-        button_positions.append((option, button_rect))
+        button_rect = draw_button(option, (x, y), BUTTON_WIDTH, BUTTON_HEIGHT, color, text_color, show_text=use_text)
+        button_positions.append((option, button_rect))  # Store color as well
     return button_positions
 
 def check_button_click(button_positions, mouse_pos):
-    for option, rect in button_positions:
+    for option, rect in button_positions:  # Unpack color
         if rect.collidepoint(mouse_pos):
-            return option
+            return option  # Return both option and color
     return None
+
+
+def incongruent_color(word):
+    available_colors = [color for color_name, color in COLORS.items() if color_name != word]
+    random_color = random.choice(available_colors)
+    return random_color
+
+
+def clear_center_area(width=BUTTON_WIDTH, height=BUTTON_HEIGHT, background_color=(255, 255, 255)):
+    # Calculate the area to be cleared, centered on the screen
+    clear_rect = pygame.Rect(
+        CENTER_POSITION[0] - width // 2,
+        CENTER_POSITION[1] - height // 2,
+        width,
+        height
+    )
+    # Draw over it with the background color
+    pygame.draw.rect(screen, background_color, clear_rect)
 
 def run_trial(trials, trial_type, prompt, draw_stimulus, check_answer):
     show_instructions(prompt, FONT, (0, 0, 0), (SCREEN_WIDTH // 2, 100))
@@ -102,10 +133,10 @@ def run_trial(trials, trial_type, prompt, draw_stimulus, check_answer):
 
     results = []
     for _ in range(trials):
-        word_or_color = random.choice(WORD_LIST)
+        word_to_be_recognized = random.choice(WORD_LIST)
         screen.fill((255, 255, 255))
-        draw_stimulus(word_or_color)
-        button_positions = draw_buttons_around_center(WORD_LIST, use_color=(trial_type == "First Set"), use_text=(trial_type == "Second Set"))
+        name_of_color_to_be_recognized = draw_stimulus(word_to_be_recognized)
+        button_positions = draw_buttons_around_center(WORD_LIST, use_color=("First Set" in trial_type), use_text=("Second Set" in trial_type))
         pygame.display.flip()
         pygame.event.clear()
         start_time = time.time()
@@ -117,17 +148,20 @@ def run_trial(trials, trial_type, prompt, draw_stimulus, check_answer):
                 response = check_button_click(button_positions, mouse_pos)
 
         reaction_time = time.time() - start_time
-        is_correct = check_answer(word_or_color, response)
+        is_correct = check_answer(word_to_be_recognized, response)
 
         results.append({
             'trial_type': trial_type,
-            'word_or_color': word_or_color,
+            'word_or_color': word_to_be_recognized,
             'response': response,
             'correct': is_correct,
             'reaction_time': reaction_time
         })
 
-        next_button_rect = draw_button("Next Trial", CENTER_POSITION, 100, 50, (0, 0, 0), (255, 255, 255))
+        # Clear the center area before drawing the "Next Trial" button
+        clear_center_area(BUTTON_WIDTH*1.6, BUTTON_HEIGHT*2)
+
+        next_button_rect = draw_button("Next Trial", CENTER_POSITION, 180, 50, (0, 0, 0), (255, 255, 255))
         pygame.display.flip()
         handle_events(next_button_rect)
     return results
@@ -140,22 +174,103 @@ def save_results(results):
         for result in results:
             writer.writerow(result)
 
+
 def calculate_summary_stats(results):
     import statistics
-    first_set_times = [r['reaction_time'] for r in results if r['trial_type'] == 'First Set']
-    second_set_times = [r['reaction_time'] for r in results if r['trial_type'] == 'Second Set']
+    # Filter results
+    first_set_congruent_times = [r['reaction_time'] for r in results if r['trial_type'] == 'First Set']
+    first_set_incongruent_times = [r['reaction_time'] for r in results if r['trial_type'] == 'First Set - Incongruent']
+    second_set_congruent_times = [r['reaction_time'] for r in results if r['trial_type'] == 'Second Set']
+    second_set_incongruent_times = [r['reaction_time'] for r in results if
+                                    r['trial_type'] == 'Second Set - Incongruent']
 
+    # Perform t-tests
+    first_ttest = ttest_ind(first_set_congruent_times, first_set_incongruent_times, equal_var=False)
+    second_ttest = ttest_ind(second_set_congruent_times, second_set_incongruent_times, equal_var=False)
+
+    # Print summary
     print("Summary of Response Times:")
-    print(f"Mean Reaction Time (First Set): {statistics.mean(first_set_times):.3f} seconds" if first_set_times else "No data")
-    print(f"Mean Reaction Time (Second Set): {statistics.mean(second_set_times):.3f} seconds" if second_set_times else "No data")
+    print(
+        f"Mean Reaction Time (First Set - Congruent): {statistics.mean(first_set_congruent_times):.3f} seconds" if first_set_congruent_times else "No data")
+    print(
+        f"Mean Reaction Time (First Set - Incongruent): {statistics.mean(first_set_incongruent_times):.3f} seconds" if first_set_incongruent_times else "No data")
+    print(f"T-test p-value (First Set): {first_ttest.pvalue:.3f}\n")
 
-def main(trials=5):
-    first_results = run_trial(trials, "First Set", "Push the color written as text!", lambda word: draw_text(word, FONT, (0, 0, 0), CENTER_POSITION), lambda word, res: word == res)
-    second_results = run_trial(trials, "Second Set", "Push the word showing the name of the color", lambda color: draw_button("", CENTER_POSITION, 150, 100, COLORS[color], (0, 0, 0)), lambda color, res: color == res)
-    all_results = first_results + second_results
+    print(
+        f"Mean Reaction Time (Second Set - Congruent): {statistics.mean(second_set_congruent_times):.3f} seconds" if second_set_congruent_times else "No data")
+    print(
+        f"Mean Reaction Time (Second Set - Incongruent): {statistics.mean(second_set_incongruent_times):.3f} seconds" if second_set_incongruent_times else "No data")
+    print(f"T-test p-value (Second Set): {second_ttest.pvalue:.3f}\n")
+
+    # Plot reaction times
+    plot_reaction_times(first_set_congruent_times, first_set_incongruent_times, second_set_congruent_times,
+                        second_set_incongruent_times)
+
+
+def plot_reaction_times(first_congruent, first_incongruent, second_congruent, second_incongruent):
+    import matplotlib.pyplot as plt
+    labels = ['First Congruent', 'First Incongruent', 'Second Congruent', 'Second Incongruent']
+    data = [
+        first_congruent,
+        first_incongruent,
+        second_congruent,
+        second_incongruent
+    ]
+
+    # Create a boxplot
+    plt.boxplot(data, labels=labels, showmeans=True)
+    plt.ylabel('Reaction Time (s)')
+    plt.title('Reaction Time Comparison')
+    plt.grid(True)
+    plt.savefig(RESULT_FIGURE)
+
+
+def main(trials=10):
+    if 0:
+        # First set of trials where the text is black (standard condition)
+        first_results = run_trial(
+            trials // 2 + 1,  # first trial starts slowly, discard
+            "First Set",
+            "Push the color written as text!",
+            lambda word: draw_text(word, FONT, (0, 0, 0), CENTER_POSITION),
+            lambda word, res: word == res
+        )
+
+        # Second set of trials where the text is shown in a random incongruent color
+        first_incongruent_results = run_trial(
+            trials // 2,
+            "First Set - Incongruent",
+            "Push the color written as text!",
+            lambda word: draw_text(word, FONT, (0, 0, 0), CENTER_POSITION, incongruent=True),
+            lambda word, res: COLORS[word] == COLORS[res]
+        )
+
+    # Second standard set of trials as originally defined
+    second_results = run_trial(
+        trials // 2 + 1, # discard 1 trial because task has changed
+        "Second Set",
+        "Push the word showing the name of the color",
+        lambda color: draw_button("", CENTER_POSITION, 150, 100, COLORS[color], (0, 0, 0)),
+        lambda color, res: color == res
+    )
+
+    # Incongruent trials for the second set
+    second_incongruent_results = run_trial(
+        trials // 2,
+        "Second Set - Incongruent",
+        "Push the word showing the name of the color",
+        lambda word: draw_text(word, FONT, (0, 0, 0), CENTER_POSITION, incongruent=True),
+        lambda word, res: COLORS[word] == COLORS[res]
+    )
+
+    # Combine all results and process
+    first_results = first_results[1:]  # first trial upon app start has delays
+    second_results = second_results[1:] # discard 1 trial because task has changed
+    all_results = first_results + first_incongruent_results + second_results + second_incongruent_results
     calculate_summary_stats(all_results)
     save_results(all_results)
     pygame.quit()
 
+
 if __name__ == '__main__':
-    main(trials=5)
+    main(trials=10)
